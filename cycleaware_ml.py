@@ -1,170 +1,177 @@
-# CycleAware-AI
-# Menstrual Cycle–Aware Modeling
+# cycleaware_ml.py
 
 import pandas as pd
 import numpy as np
-
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestRegressor
+import warnings
 
-import matplotlib.pyplot as plt
-plt.close('all')
-from sklearn.metrics import r2_score, mean_absolute_error
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names"
+)
 
-# Load DataSet
-df = pd.read_csv("menstrual_aware_dataset_with_user_id.csv")
-print("\nDataset Loaded Successfully\n")
+from model_runner import ModelRunner
+from plotter import ResultsPlotter
 
-# Define Features
-features_with_phase = ["sleep", "stress", "mood", "activity", "cycle_phase"]
-features_without_phase = ["sleep", "stress", "mood", "activity"]
+# Load Data
+#df = pd.read_csv("menstrual_aware_dataset_with_user_id.csv")
+df = pd.read_csv("menstrual_aware_largedataset.csv")
+df = df.sort_values(["User_ID"]).reset_index(drop=True)
 
-# Define Targets
+# Create Cycle Phase (Categorical)
+if "cycle_day" not in df.columns:
+    df["cycle_day"] = df.groupby("User_ID").cumcount() % 28 + 1
+
+def get_phase(day):
+    if day <= 5:
+        return "menstrual"
+    elif day <= 12:
+        return "follicular"
+    elif day <= 16:
+        return "ovulatory"
+    else:
+        return "luteal"
+
+df["cycle_phase"] = df["cycle_day"].apply(get_phase)
+
+# Within-User Normalization
+df["sleep_user_mean"] = df.groupby("User_ID")["sleep"].transform("mean")
+df["stress_user_mean"] = df.groupby("User_ID")["stress"].transform("mean")
+df["sleep_z"] = (
+                        df["sleep"] - df["sleep_user_mean"]
+                ) / df.groupby("User_ID")["sleep"].transform("std")
+df["stress_z"] = (
+                         df["stress"] - df["stress_user_mean"]
+                 ) / df.groupby("User_ID")["stress"].transform("std")
+
+df = df.dropna().reset_index(drop=True)
+
+# Feature Sets
+features_with = [
+    "sleep_z",
+    "stress_z",
+    "mood",
+    "activity",
+    "cycle_phase"
+]
+
+features_without = [
+    "sleep_z",
+    "stress_z",
+    "mood",
+    "activity"
+]
+
 target_attention = "attention_score"
 target_memory = "memory_score"
 
-# Train-Test Split
-train_idx, test_idx = train_test_split(
-    df.index, test_size=0.2, random_state=42
-)
+# Group-Aware Train/Test Split
+gss = GroupShuffleSplit(test_size=0.2, random_state=42)
+train_idx, test_idx = next(gss.split(df, groups=df["User_ID"]))
 
-X_train_w = df.loc[train_idx, features_with_phase]
-X_test_w  = df.loc[test_idx,  features_with_phase]
+X_train_w = df.loc[train_idx, features_with]
+X_test_w = df.loc[test_idx, features_with]
 
-X_train_wo = df.loc[train_idx, features_without_phase]
-X_test_wo  = df.loc[test_idx,  features_without_phase]
+X_train_wo = df.loc[train_idx, features_without]
+X_test_wo = df.loc[test_idx, features_without]
 
 y_train_att = df.loc[train_idx, target_attention]
-y_test_att  = df.loc[test_idx,  target_attention]
+y_test_att = df.loc[test_idx, target_attention]
 
 y_train_mem = df.loc[train_idx, target_memory]
-y_test_mem  = df.loc[test_idx,  target_memory]
+y_test_mem = df.loc[test_idx, target_memory]
 
-# Pre Processing
-categorical_with_phase = ["activity", "cycle_phase"]
-categorical_without_phase = ["activity"]
+# Preprocessing
+categorical_cols_with = ["activity", "cycle_phase"]
+categorical_cols_without = ["activity"]
 
-preprocess_with_phase = ColumnTransformer(
-    [
-        ("cat", OneHotEncoder(), categorical_with_phase),
-        ("num", StandardScaler(), ["sleep", "stress", "mood"])
+numeric_cols_with = [
+    "sleep_z",
+    "stress_z",
+    "mood"
+]
+
+numeric_cols_without = [
+    "sleep_z",
+    "stress_z",
+    "mood"
+]
+
+preprocess_with = ColumnTransformer([
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols_with),
+    ("num", StandardScaler(), numeric_cols_with)
+])
+
+preprocess_without = ColumnTransformer([
+    ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_cols_without),
+    ("num", StandardScaler(), numeric_cols_without)
+])
+
+
+# Run Models
+models = ["linear", "rf", "xgb", "cat"]
+
+runner = ModelRunner(preprocess_with, preprocess_without)
+
+all_results = runner.run_all_models(
+    models,
+    X_train_w, X_test_w,
+    X_train_wo, X_test_wo,
+    y_train_att, y_test_att,
+    y_train_mem, y_test_mem
+)
+
+# Results Table
+results_table = pd.DataFrame()
+
+for model in models:
+    results_table[f"Att_R2_{model}"] = [
+        all_results["Attention"][model]["r2_with"]
     ]
-)
-
-preprocess_without_phase = ColumnTransformer(
-    [
-        ("cat", OneHotEncoder(), categorical_without_phase),
-        ("num", StandardScaler(), ["sleep", "stress", "mood"])
+    results_table[f"Mem_R2_{model}"] = [
+        all_results["Memory"][model]["r2_with"]
     ]
-)
 
-# Model Pipeline
-def build_model(preprocess):
-    return Pipeline([
-        ("prep", preprocess),
-        ("rf", RandomForestRegressor(n_estimators=200, random_state=42))
-    ])
+print("\n=== Model Comparison Table ===")
+print(results_table)
 
-# Build Attention Models
-model_attn_with_phase = build_model(preprocess_with_phase)
-model_attn_without_phase = build_model(preprocess_without_phase)
-# Build Memory Models
-model_mem_with_phase = build_model(preprocess_with_phase)
-model_mem_without_phase = build_model(preprocess_without_phase)
+# Cross Validation (Group Aware)
+print("\n\n===== CROSS-VALIDATION RESULTS =====")
 
-# Train Attention Models
-model_attn_with_phase.fit(X_train_w, y_train_att)
-model_attn_without_phase.fit(X_train_wo, y_train_att)
-# Train Memory Models
-model_mem_with_phase.fit(X_train_w, y_train_mem)
-model_mem_without_phase.fit(X_train_wo, y_train_mem)
+cv_results = {}
 
-# Predict using the models
-pred_att_with    = model_attn_with_phase.predict(X_test_w)
-pred_att_without = model_attn_without_phase.predict(X_test_wo)
+for model in models:
+    print(f"\nCross-validating {model.upper()}...")
 
-pred_mem_with    = model_mem_with_phase.predict(X_test_w)
-pred_mem_without = model_mem_without_phase.predict(X_test_wo)
+    att_cv = runner.cross_validate_model(
+        model,
+        df[features_with],
+        df[features_without],
+        df[target_attention],
+        df["User_ID"]
+    )
 
-# Training Predictions
-train_pred_att_with = model_attn_with_phase.predict(X_train_w)
-train_pred_att_without = model_attn_without_phase.predict(X_train_wo)
+    mem_cv = runner.cross_validate_model(
+        model,
+        df[features_with],
+        df[features_without],
+        df[target_memory],
+        df["User_ID"]
+    )
 
-# Testing R2 Scores
-r2_train_with = r2_score(y_train_att, train_pred_att_with)
-r2_test_with = r2_score(y_test_att, pred_att_with)
+    cv_results[model] = {
+        "Attention": att_cv,
+        "Memory": mem_cv
+    }
 
-r2_train_without = r2_score(y_train_att, train_pred_att_without)
-r2_test_without = r2_score(y_test_att, pred_att_without)
+    print("\nAttention:")
+    print(att_cv)
 
-print("\nR2 Scores (Attention Model)")
-print("With Cycle - Train:", round(r2_train_with,3),
-      "Test:", round(r2_test_with,3))
+    print("\nMemory:")
+    print(mem_cv)
 
-print("Without Cycle - Train:", round(r2_train_without,3),
-      "Test:", round(r2_test_without,3))
-
-# Show results as table
-# RESULT: Comparative Results with and without cycle as a feature
-results_table = pd.DataFrame({
-    "User_ID": df.loc[test_idx, "User_ID"].values,
-    "Cycle Phase": df.loc[test_idx, "cycle_phase"].values,
-    "Tested_Att": y_test_att.values,
-    "Pred_Att_W": np.round(pred_att_with, 1),
-    "Pred_Att_WO": np.round(pred_att_without, 1),
-    "Tested_Mem": y_test_mem.values,
-    "Pred_Mem_W": np.round(pred_mem_with, 1),
-    "Pred_Mem_WO": np.round(pred_mem_without, 1),
-})
-
-# Sort and show first few users
-results_table = results_table.sort_values("User_ID").head(10)
-
-print("\n Displaying Comparative Results for few Users, the model is run over 100 users")
-print(results_table.to_string(index=False))
-
-# Statistical Analysis of the results
-# compare the accuracy based on predicted output
-# for models trained using the menstrual cycle data vs without menstrual cycle data
-from statistical_validation import CycleAwareStats
-
-df_test = df.loc[test_idx].copy()
-
-stats = CycleAwareStats(
-    y_test_att.values,
-    pred_att_with,
-    pred_att_without,
-    y_test_mem.values,
-    pred_mem_with,
-    pred_mem_without,
-    df_test
-)
-stats.full_report()
-
-# Show results as side by side graphs for R2 and MAE
-fig, axes = plt.subplots(1, 2)
-
-# R2 Plot
-labels = ["Train With", "Test With", "Train Without", "Test Without"]
-scores = [r2_train_with, r2_test_with,
-          r2_train_without, r2_test_without]
-
-axes[0].bar(labels, scores)
-axes[0].set_title("R2 Scores (200 Trees)")
-axes[0].set_ylabel("R2 Score")
-axes[0].tick_params(axis='x', rotation=45)
-
-# MAE Plot
-mae_with = mean_absolute_error(y_test_att, pred_att_with)
-mae_without = mean_absolute_error(y_test_att, pred_att_without)
-
-axes[1].bar(["With Cycle", "Without Cycle"],
-            [mae_with, mae_without])
-axes[1].set_title("MAE Comparison")
-axes[1].set_ylabel("Mean Absolute Error")
-
-plt.tight_layout()
-plt.show()
+# Plot Results
+#ResultsPlotter.plot_model_comparison(all_results)
+ResultsPlotter.plot_cycle_comparison(cv_results)
