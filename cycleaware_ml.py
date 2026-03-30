@@ -10,31 +10,18 @@ import warnings
 warnings.filterwarnings(
     "ignore",
     message="X does not have valid feature names"
-)
+)\
 
 from model_runner import ModelRunner
 from plotter import ResultsPlotter
 
 # Load Data
-#df = pd.read_csv("menstrual_aware_dataset_with_user_id.csv")
-df = pd.read_csv("menstrual_aware_largedataset.csv")
+df = pd.read_csv("menstrual_cycle_nonlinear_strong.csv")
 df = df.sort_values(["User_ID"]).reset_index(drop=True)
 
-# Create Cycle Phase (Categorical)
-if "cycle_day" not in df.columns:
-    df["cycle_day"] = df.groupby("User_ID").cumcount() % 28 + 1
-
-def get_phase(day):
-    if day <= 5:
-        return "menstrual"
-    elif day <= 12:
-        return "follicular"
-    elif day <= 16:
-        return "ovulatory"
-    else:
-        return "luteal"
-
-df["cycle_phase"] = df["cycle_day"].apply(get_phase)
+# Cycle phase already exists in the dataset
+# No need to recreate it since menstrual_cycle_nonlinear_strong.csv has it built in
+pass
 
 # Within-User Normalization
 df["sleep_user_mean"] = df.groupby("User_ID")["sleep"].transform("mean")
@@ -175,3 +162,9 @@ for model in models:
 # Plot Results
 #ResultsPlotter.plot_model_comparison(all_results)
 ResultsPlotter.plot_cycle_comparison(cv_results)
+ResultsPlotter.plot_r2_comparison(cv_results)
+ResultsPlotter.plot_mae_reduction(cv_results)
+ResultsPlotter.plot_feature_importance(runner, X_train_w, y_train_att)
+ResultsPlotter.plot_cycle_phase_performance(df)
+ResultsPlotter.plot_pipeline()
+print("ALL PLOTS GENERATED")
